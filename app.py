@@ -9,6 +9,7 @@ Deploy:        push to GitHub → map repo in Streamlit Community Cloud → set 
 """
 from __future__ import annotations
 
+import os
 import time
 
 import streamlit as st
@@ -22,21 +23,45 @@ st.set_page_config(
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Boot: keys + one-time Guardrails setup
+# Boot: keys (sidebar inputs → secrets → env) + one-time Guardrails setup
 # ──────────────────────────────────────────────────────────────────────────────
-keys = G.configure_keys()
-setup = G.setup_guardrails()
-PII_REAL = setup["pii"]
-COMP_REAL = setup["competitor"]
-
 with st.sidebar:
     st.title("🛡️ Guardrails AI")
     st.caption("NimbusPay fintech support-bot demo")
     st.divider()
 
+    st.subheader("🔑 API keys")
+    st.caption(
+        "Paste your keys to run the app. They live only in this browser session — "
+        "nothing is written to disk or committed. If keys are already set in Streamlit "
+        "**Secrets**, these fields are pre-filled."
+    )
+    groq_in = st.text_input(
+        "Groq API key",
+        value=G.get_key("GROQ_API_KEY") or "",
+        type="password",
+        help="Free at console.groq.com/keys — used for every model call.",
+    )
+    grd_in = st.text_input(
+        "Guardrails Hub token (optional)",
+        value=G.get_key("GUARDRAILS_TOKEN") or "",
+        type="password",
+        help="Free at hub.guardrailsai.com — enables the real DetectPII & "
+             "CompetitorCheck validators. Without it the app uses regex/substring "
+             "fallbacks and still runs.",
+    )
+
+    # Resolve + apply (UI override wins), then run setup keyed on the token so the
+    # Hub install re-runs when the token changes.
+    keys = G.apply_keys(groq_in.strip() or None, grd_in.strip() or None)
+    setup = G.setup_guardrails(os.environ.get("GUARDRAILS_TOKEN"))
+    PII_REAL = setup["pii"]
+    COMP_REAL = setup["competitor"]
+
+    st.divider()
     st.subheader("Status")
-    st.write("Groq key:", "✅" if keys["groq"] else "❌ missing")
-    st.write("Guardrails token:", "✅" if keys["guardrails"] else "❌ missing")
+    st.write("Groq key:", "✅" if keys["groq"] else "❌ enter above")
+    st.write("Guardrails token:", "✅" if keys["guardrails"] else "➖ none (fallbacks)")
     st.write("DetectPII (Hub):", "✅ real" if PII_REAL else "↩️ regex fallback")
     st.write("CompetitorCheck (Hub):", "✅ real" if COMP_REAL else "↩️ substring fallback")
     if setup.get("error"):
@@ -47,12 +72,13 @@ with st.sidebar:
         "Toxicity & topic checks use **LLM-as-judge** (Groq) — no ML weights, so the app "
         "fits Streamlit Cloud's 1 GB limit."
     )
-    st.caption("⚠️ Live calls consume the deployer's Groq quota.")
+    st.caption("⚠️ Live calls consume the Groq key entered above.")
 
 if not keys["groq"]:
-    st.error(
-        "No **GROQ_API_KEY** found. Add it to `.streamlit/secrets.toml` (local) or the "
-        "Streamlit Cloud **Secrets** box. See `README.md`."
+    st.info(
+        "👈 **Enter your Groq API key in the sidebar to start.** "
+        "Get one free at [console.groq.com/keys](https://console.groq.com/keys). "
+        "The optional Guardrails Hub token unlocks the real PII/competitor validators."
     )
     st.stop()
 

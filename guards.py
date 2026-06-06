@@ -49,17 +49,24 @@ def get_key(name: str) -> str | None:
     return os.environ.get(name)
 
 
-def configure_keys() -> dict:
-    """Push keys into the environment so litellm / guardrails pick them up.
+def apply_keys(groq_override: str | None = None,
+               guardrails_override: str | None = None) -> dict:
+    """Resolve keys (UI override → secrets → env) and push them into the environment
+    so litellm / guardrails pick them up.
 
-    Returns a dict of which keys are present.
+    Pass values typed into the sidebar as overrides; they win over secrets/env.
+    Returns a dict of which keys ended up present.
     """
-    groq = get_key("GROQ_API_KEY")
-    grd = get_key("GUARDRAILS_TOKEN")
+    groq = groq_override or get_key("GROQ_API_KEY")
+    grd = guardrails_override or get_key("GUARDRAILS_TOKEN")
     if groq:
         os.environ["GROQ_API_KEY"] = groq
+    else:
+        os.environ.pop("GROQ_API_KEY", None)
     if grd:
         os.environ["GUARDRAILS_TOKEN"] = grd
+    else:
+        os.environ.pop("GUARDRAILS_TOKEN", None)
     return {"groq": bool(groq), "guardrails": bool(grd)}
 
 
@@ -67,15 +74,17 @@ def configure_keys() -> dict:
 # One-time Guardrails setup: configure + hub install (cached per cold start)
 # ──────────────────────────────────────────────────────────────────────────────
 @st.cache_resource(show_spinner="Configuring Guardrails & installing Hub validators…")
-def setup_guardrails() -> dict:
+def setup_guardrails(token: str | None) -> dict:
     """Configure the Hub CLI and install the two light validators.
+
+    `token` is an explicit parameter (not read from env) so Streamlit's cache
+    re-runs the install whenever the user enters/changes the token in the sidebar.
 
     Returns a status dict: {"pii": bool, "competitor": bool, "error": str | None}.
     On any failure the caller falls back to regex / substring matching, so the app
     never hard-fails on Streamlit Cloud.
     """
     status = {"pii": False, "competitor": False, "error": None}
-    token = os.environ.get("GUARDRAILS_TOKEN")
 
     if not token:
         status["error"] = "No GUARDRAILS_TOKEN — using regex/substring fallbacks."

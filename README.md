@@ -43,6 +43,11 @@ Keys needed:
 - `GUARDRAILS_TOKEN` — https://hub.guardrailsai.com (free; optional — without it the app
   uses regex/substring fallbacks for PII/competitor checks).
 
+> 💡 **Bring your own key (no config needed).** You don't have to touch `secrets.toml` at
+> all — just launch the app and paste your keys into the **🔑 API keys** fields in the
+> sidebar. They live only in that browser session (never written to disk or committed). If
+> keys *are* present in `secrets.toml` / Cloud Secrets, the sidebar fields are pre-filled.
+
 ## Deploy to Streamlit Community Cloud
 
 1. **Push to GitHub.** Commit everything *except* `.streamlit/secrets.toml` (already
@@ -57,8 +62,9 @@ Keys needed:
 4. **Deploy.** First cold start is slower — it installs the Hub validators. Watch the
    sidebar **Status** panel: each validator shows `✅ real` or `↩️ fallback`.
 
-> ⚠️ Live calls consume **your** Groq quota. For a public class link, consider adding a
-> "bring-your-own-key" `st.text_input` in the sidebar so learners use their own key.
+> ⚠️ Live calls consume the Groq key in use. For a public class link you can leave the
+> Cloud Secrets **empty** — the sidebar **🔑 API keys** fields let each learner paste their
+> own Groq key, so calls hit their quota instead of yours.
 
 ## Files
 
