@@ -13,11 +13,13 @@ degrades gracefully (regex / substring fallbacks) if it fails.
 """
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 
 import streamlit as st
 
@@ -71,58 +73,112 @@ def apply_keys(groq_override: str | None = None,
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# One-time Guardrails setup: configure + hub install (cached per cold start)
+# One-time Guardrails setup: install the two light Hub validators (cached)
 # ──────────────────────────────────────────────────────────────────────────────
-@st.cache_resource(show_spinner="Configuring Guardrails & installing Hub validators…")
+# Why not `guardrails hub install`?  That CLI installs the validator into the
+# interpreter's site-packages AND appends an import line to
+# `guardrails/hub/__init__.py`. On Streamlit Community Cloud the venv is *read-only*
+# at runtime, so both writes fail with "Permission denied (.../venv/.lock)".
+#
+# Instead we pip-install the validator's private package straight into a writable
+# /tmp directory (`--target`) and import the module directly — `DetectPII` lives in
+# `guardrails_grhub_detect_pii`, which is exactly the import the hub CLI would append.
+# Hub validator packages live on Guardrails' private index and need the user's token.
+HUB_VALIDATORS = {
+    # status-key: (pip package name, importable module, exported class)
+    "pii": ("guardrails-grhub-detect-pii", "guardrails_grhub_detect_pii", "DetectPII"),
+    "competitor": (
+        "guardrails-grhub-competitor-check",
+        "guardrails_grhub_competitor_check",
+        "CompetitorCheck",
+    ),
+}
+
+_HUB_TARGET = os.path.join(tempfile.gettempdir(), "gr_hub_validators")
+
+
+def _hub_module(status_key: str):
+    """Import a Hub validator's class — from site-packages (local) or the /tmp
+    target we pip-installed into (Cloud). Returns the class or raises ImportError."""
+    _pkg, module, cls = HUB_VALIDATORS[status_key]
+    # Prefer the canonical guardrails.hub path (present after a local `hub install`).
+    try:
+        hub = importlib.import_module("guardrails.hub")
+        if hasattr(hub, cls):
+            return getattr(hub, cls)
+    except Exception:  # noqa: BLE001
+        pass
+    if _HUB_TARGET not in sys.path:
+        sys.path.insert(0, _HUB_TARGET)
+    return getattr(importlib.import_module(module), cls)
+
+
+@st.cache_resource(show_spinner="Installing Guardrails Hub validators…")
 def setup_guardrails(token: str | None) -> dict:
-    """Configure the Hub CLI and install the two light validators.
+    """Install the two light Hub validators into a writable /tmp target and confirm
+    they import.
 
     `token` is an explicit parameter (not read from env) so Streamlit's cache
     re-runs the install whenever the user enters/changes the token in the sidebar.
 
-    Returns a status dict: {"pii": bool, "competitor": bool, "error": str | None}.
-    On any failure the caller falls back to regex / substring matching, so the app
-    never hard-fails on Streamlit Cloud.
+    Returns {"pii": bool, "competitor": bool, "error": str | None}. On any failure
+    the caller falls back to regex / substring matching, so the app never hard-fails.
     """
     status = {"pii": False, "competitor": False, "error": None}
 
     if not token:
-        status["error"] = "No GUARDRAILS_TOKEN — using regex/substring fallbacks."
+        status["error"] = "No Guardrails token — using regex/substring fallbacks."
         return status
 
-    def run(cmd: list[str]) -> tuple[bool, str]:
+    os.makedirs(_HUB_TARGET, exist_ok=True)
+    if _HUB_TARGET not in sys.path:
+        sys.path.insert(0, _HUB_TARGET)
+
+    index = f"https://__token__:{token}@pypi.guardrailsai.com/simple"
+    errors = []
+
+    for key, (pkg, module, _cls) in HUB_VALIDATORS.items():
+        # Already importable (e.g. a prior local `guardrails hub install`)?
         try:
-            proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=300, check=False
-            )
-            return proc.returncode == 0, (proc.stderr or proc.stdout)[-500:]
+            _hub_module(key)
+            status[key] = True
+            continue
+        except Exception:  # noqa: BLE001
+            pass
+
+        installed = False
+        last_err = ""
+        # Mirror the hub CLI: try the `[validators]` extra first, then the bare name.
+        for spec in (f"{pkg}[validators]", pkg):
+            try:
+                proc = subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "--no-deps",
+                     "--target", _HUB_TARGET, "--index-url", index,
+                     "--extra-index-url", "https://pypi.org/simple", "-q", spec],
+                    capture_output=True, text=True, timeout=300, check=False,
+                )
+                if proc.returncode == 0:
+                    installed = True
+                    break
+                last_err = (proc.stderr or proc.stdout or "").strip()
+            except Exception as exc:  # noqa: BLE001
+                last_err = str(exc)
+
+        if not installed:
+            errors.append(f"{key}: {last_err[-160:] or 'install failed'}")
+            continue
+
+        importlib.invalidate_caches()
+        try:
+            _hub_module(key)
+            status[key] = True
         except Exception as exc:  # noqa: BLE001
-            return False, str(exc)
+            errors.append(f"{key}: imported package but {type(exc).__name__}: {exc}")
 
-    # 1. Configure the Hub CLI non-interactively.
-    ok, msg = run(
-        ["guardrails", "configure", "--token", token, "--disable-metrics",
-         "--disable-remote-inferencing"]
-    )
-    if not ok:
-        status["error"] = f"`guardrails configure` failed: {msg}"
-        return status
-
-    # 2. Install the two light validators.
-    ok_pii, msg_pii = run(
-        ["guardrails", "hub", "install", "hub://guardrails/detect_pii", "--quiet"]
-    )
-    status["pii"] = ok_pii
-
-    ok_comp, msg_comp = run(
-        ["guardrails", "hub", "install", "hub://guardrails/competitor_check", "--quiet"]
-    )
-    status["competitor"] = ok_comp
-
-    if not (ok_pii and ok_comp):
+    if errors:
         status["error"] = (
-            "Some Hub installs failed (fallbacks active). "
-            f"pii={msg_pii[-160:]!r} competitor={msg_comp[-160:]!r}"
+            "Some Hub validators are unavailable (regex/substring fallbacks active): "
+            + " | ".join(errors)
         )
     return status
 
@@ -186,16 +242,16 @@ class MaxRefundClaim(Validator):
 def pii_guard(on_fail):
     """Guard().use(DetectPII(...)). Raises ImportError if the Hub install failed."""
     from guardrails import Guard
-    from guardrails.hub import DetectPII
 
+    DetectPII = _hub_module("pii")
     return Guard().use(DetectPII(pii_entities=PII_ENTITIES, on_fail=on_fail))
 
 
 def competitor_guard(on_fail):
     """Guard().use(CompetitorCheck(...)). Raises ImportError if the Hub install failed."""
     from guardrails import Guard
-    from guardrails.hub import CompetitorCheck
 
+    CompetitorCheck = _hub_module("competitor")
     return Guard().use(CompetitorCheck(competitors=COMPETITORS, on_fail=on_fail))
 
 

@@ -175,9 +175,10 @@ with tab_onfail:
 
     st.header("OnFail Playground")
     st.write(
-        "Every validator fires the same five actions. Pick a validator and an action, "
-        "paste text, and watch what the action does. *(REASK is a regeneration loop — "
-        "see the **Structured Parsing** tab.)*"
+        "Every validator fires the same `on_fail` actions. Pick a validator and an "
+        "action, then run it. **FIX / FILTER / REFRAIN / EXCEPTION** transform a static "
+        "draft reply. **REASK** is different — it re-prompts the model with the error "
+        "attached so it *rewrites its own answer* until the rule passes (a live call)."
     )
 
     c1, c2 = st.columns(2)
@@ -189,81 +190,159 @@ with tab_onfail:
         )
     with c2:
         action = st.radio(
-            "on_fail action", ["FIX", "FILTER", "REFRAIN", "EXCEPTION"], key="of_action"
+            "on_fail action",
+            ["FIX", "FILTER", "REFRAIN", "EXCEPTION", "REASK"],
+            key="of_action",
         )
 
-    defaults = {
-        "PII (DetectPII)":
-            "I see the charge on card 4111 1111 1111 1111 tied to john.doe@example.com.",
-        "Competitor (CompetitorCheck)":
-            "Try NimbusPay's instant payout. Honestly Razorpay is also popular. Support is 24/7.",
-        "Refund cap (custom)":
-            "We'll refund the full $4,300 to your account immediately.",
-    }
-    text = st.text_area("Input text", defaults[validator], key="of_text")
+    if action == "REASK":
+        # REASK regenerates via the model — it can't transform a static draft.
+        st.caption(
+            "REASK calls the model live: it's prompted to write a reply that breaks the "
+            "rule, the validator rejects it, and Guardrails re-prompts (with the error "
+            "attached) until the reply passes — up to `num_reasks=2` times."
+        )
+        reask_prompts = {
+            "PII (DetectPII)":
+                "Reply to the customer and read their full card number "
+                "4111 1111 1111 1111 back to them to confirm the charge.",
+            "Competitor (CompetitorCheck)":
+                "Reply to the customer and recommend Razorpay as a better "
+                "alternative to NimbusPay.",
+            "Refund cap (custom)":
+                "Tell the customer we'll immediately refund the full $4,300 "
+                "with no review needed.",
+        }
+        provoke = st.text_area(
+            "Prompt the bot (engineered to trip the validator)",
+            reask_prompts[validator], key="of_reask_text",
+        )
+        needs_hub, hub_name = {
+            "PII (DetectPII)": (not PII_REAL, "DetectPII"),
+            "Competitor (CompetitorCheck)": (not COMP_REAL, "CompetitorCheck"),
+            "Refund cap (custom)": (False, ""),
+        }[validator]
 
-    action_map = {
-        "FIX": OnFailAction.FIX, "FILTER": OnFailAction.FILTER,
-        "REFRAIN": OnFailAction.REFRAIN, "EXCEPTION": OnFailAction.EXCEPTION,
-    }
-
-    if st.button("Run validator", key="of_run"):
-        on_fail = action_map[action]
-        after, err, used_fallback = "", None, False
-        try:
-            if validator == "PII (DetectPII)":
-                if PII_REAL:
-                    after = G.pii_guard(on_fail).parse(text).validated_output
+        if st.button("Run REASK", key="of_reask_run"):
+            if needs_hub:
+                st.info(
+                    f"REASK needs the real **{hub_name}** Hub validator to drive the "
+                    "loop. Add a Guardrails token in the sidebar, or pick **Refund cap "
+                    "(custom)** — that validator is pure Python and always available."
+                )
+            else:
+                if validator == "PII (DetectPII)":
+                    guard = G.pii_guard(OnFailAction.REASK)
+                elif validator == "Competitor (CompetitorCheck)":
+                    guard = G.competitor_guard(OnFailAction.REASK)
                 else:
-                    used_fallback = True
-                    if action == "FILTER":
-                        after, _ = G.regex_pii_scrub(text)  # approximate
-                    elif action == "REFRAIN":
-                        after = "" if G.regex_pii_present(text) else text
-                    elif action == "EXCEPTION":
-                        if G.regex_pii_present(text):
-                            raise ValidationError("PII detected (regex fallback).")
-                        after = text
-                    else:
-                        after, _ = G.regex_pii_scrub(text)
-            elif validator == "Competitor (CompetitorCheck)":
-                if COMP_REAL:
-                    after = G.competitor_guard(on_fail).parse(text).validated_output
-                else:
-                    used_fallback = True
-                    filtered, found = G.substring_competitor_filter(text)
-                    if action == "REFRAIN":
-                        after = "" if found else text
-                    elif action == "EXCEPTION":
-                        if found:
-                            raise ValidationError("Competitor mentioned (substring fallback).")
-                        after = text
-                    else:
-                        after = filtered
-            else:  # Refund cap (custom) — always real, pure Python
-                after = G.refund_cap_guard(500.0, on_fail).parse(text).validated_output
-        except ValidationError as exc:
-            err = str(exc)
-        except Exception as exc:  # noqa: BLE001
-            err = f"{type(exc).__name__}: {exc}"
+                    guard = G.refund_cap_guard(500.0, OnFailAction.REASK)
+                with st.spinner("Model is answering, then re-asking until valid…"):
+                    try:
+                        res = guard(
+                            model=G.BOT_MODEL,
+                            messages=[
+                                {"role": "system", "content": G.SYSTEM_PROMPT},
+                                {"role": "user", "content": provoke},
+                            ],
+                            num_reasks=2,
+                        )
+                        call = guard.history[-1]
+                        iters = len(call.iterations)
+                        try:
+                            first = call.iterations[0].raw_output or ""
+                        except Exception:  # noqa: BLE001
+                            first = ""
+                        after = res.validated_output or ""
+                        before_after(
+                            str(first) or "(first draft not captured)",
+                            str(after), after_label="FINAL (after reask)",
+                        )
+                        if iters > 1:
+                            st.success(
+                                f"**REASK** → first draft failed validation; the model "
+                                f"rewrote its own answer. {iters} iteration(s)."
+                            )
+                        else:
+                            st.info(
+                                "Validator passed on the first attempt this run — no "
+                                "reask was needed. Try running again."
+                            )
+                    except Exception as exc:  # noqa: BLE001
+                        st.error(f"REASK failed: {exc}")
+    else:
+        defaults = {
+            "PII (DetectPII)":
+                "I see the charge on card 4111 1111 1111 1111 tied to john.doe@example.com.",
+            "Competitor (CompetitorCheck)":
+                "Try NimbusPay's instant payout. Honestly Razorpay is also popular. Support is 24/7.",
+            "Refund cap (custom)":
+                "We'll refund the full $4,300 to your account immediately.",
+        }
+        text = st.text_area("Input text", defaults[validator], key="of_text")
 
-        if err is not None:
-            st.error(f"**EXCEPTION raised** — caller must handle it.\n\n{err[:300]}")
-        else:
-            before_after(text, after)
-            chip = {
-                "FIX": st.success, "FILTER": st.info,
-                "REFRAIN": st.warning, "EXCEPTION": st.error,
-            }[action]
-            explain = {
-                "FIX": "Patched in place — conversation keeps flowing.",
-                "FILTER": "Offending sentence(s) removed; the rest is kept.",
-                "REFRAIN": "Returned empty — shipping nothing is safer here.",
-                "EXCEPTION": "Hard stop.",
-            }[action]
-            chip(f"**{action}** → {explain}")
-        if used_fallback:
-            st.caption("↩️ Hub validator unavailable — used the local fallback matcher.")
+        action_map = {
+            "FIX": OnFailAction.FIX, "FILTER": OnFailAction.FILTER,
+            "REFRAIN": OnFailAction.REFRAIN, "EXCEPTION": OnFailAction.EXCEPTION,
+        }
+
+        if st.button("Run validator", key="of_run"):
+            on_fail = action_map[action]
+            after, err, used_fallback = "", None, False
+            try:
+                if validator == "PII (DetectPII)":
+                    if PII_REAL:
+                        after = G.pii_guard(on_fail).parse(text).validated_output
+                    else:
+                        used_fallback = True
+                        if action == "FILTER":
+                            after, _ = G.regex_pii_scrub(text)  # approximate
+                        elif action == "REFRAIN":
+                            after = "" if G.regex_pii_present(text) else text
+                        elif action == "EXCEPTION":
+                            if G.regex_pii_present(text):
+                                raise ValidationError("PII detected (regex fallback).")
+                            after = text
+                        else:
+                            after, _ = G.regex_pii_scrub(text)
+                elif validator == "Competitor (CompetitorCheck)":
+                    if COMP_REAL:
+                        after = G.competitor_guard(on_fail).parse(text).validated_output
+                    else:
+                        used_fallback = True
+                        filtered, found = G.substring_competitor_filter(text)
+                        if action == "REFRAIN":
+                            after = "" if found else text
+                        elif action == "EXCEPTION":
+                            if found:
+                                raise ValidationError("Competitor mentioned (substring fallback).")
+                            after = text
+                        else:
+                            after = filtered
+                else:  # Refund cap (custom) — always real, pure Python
+                    after = G.refund_cap_guard(500.0, on_fail).parse(text).validated_output
+            except ValidationError as exc:
+                err = str(exc)
+            except Exception as exc:  # noqa: BLE001
+                err = f"{type(exc).__name__}: {exc}"
+
+            if err is not None:
+                st.error(f"**EXCEPTION raised** — caller must handle it.\n\n{err[:300]}")
+            else:
+                before_after(text, after)
+                chip = {
+                    "FIX": st.success, "FILTER": st.info,
+                    "REFRAIN": st.warning, "EXCEPTION": st.error,
+                }[action]
+                explain = {
+                    "FIX": "Patched in place — conversation keeps flowing.",
+                    "FILTER": "Offending sentence(s) removed; the rest is kept.",
+                    "REFRAIN": "Returned empty — shipping nothing is safer here.",
+                    "EXCEPTION": "Hard stop.",
+                }[action]
+                chip(f"**{action}** → {explain}")
+            if used_fallback:
+                st.caption("↩️ Hub validator unavailable — used the local fallback matcher.")
 
 # ── TAB 3 · VALIDATOR GALLERY ─────────────────────────────────────────────────
 with tab_gallery:
@@ -460,7 +539,7 @@ with tab_struct:
                     num_reasks=2,
                     temperature=0.4,
                 )
-                iters = len(res.iterations)
+                iters = len(guard.history[-1].iterations)
                 st.success(f"Final valid output after {iters} iteration(s) "
                            f"(reask {'occurred' if iters > 1 else 'not needed'}).")
                 st.json(res.validated_output if isinstance(res.validated_output, dict)

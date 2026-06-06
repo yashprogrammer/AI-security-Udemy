@@ -18,9 +18,14 @@ Streamlit Community Cloud gives each app **1 GB RAM** and only runs
 
 - **No torch.** The Hub's `ToxicLanguage` / `GibberishText` validators pull PyTorch and
   would blow the memory cap. Toxicity & topic use **LLM-as-judge** calls to Groq instead.
-- **Hub validators install at runtime.** `guardrails hub install` is a CLI step Cloud
-  won't run for you, so `guards.setup_guardrails()` runs it once per cold start (cached).
-  If it fails, the app falls back to regex/substring matchers and **keeps working**.
+- **Hub validators install at runtime, into `/tmp`.** The `guardrails hub install` CLI
+  writes the validator into read-only site-packages *and* edits `guardrails/hub/__init__.py`
+  — both fail on Cloud with `Permission denied (.../venv/.lock)`. Instead
+  `guards.setup_guardrails()` pip-installs the validator packages
+  (`guardrails-grhub-detect-pii`, `…-competitor-check`) into a **writable `/tmp` target**
+  and imports them directly (cached per cold start). The packages live on Guardrails'
+  private index, so this only runs when you supply a `GUARDRAILS_TOKEN`. If anything
+  fails, the app falls back to regex/substring matchers and **keeps working**.
 - **Pinned `guardrails-ai==0.10.0`.** Version 0.10.1 was a malicious supply-chain upload
   (CVE-2026-45758) and was pulled; 0.10.0 is clean.
 
