@@ -1,0 +1,21 @@
+# Secrets — never commit real keys
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Guardrails local config (may contain the Hub token)
+.guardrailsrc
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
