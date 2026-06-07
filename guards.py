@@ -97,6 +97,46 @@ HUB_VALIDATORS = {
 _HUB_TARGET = os.path.join(tempfile.gettempdir(), "gr_hub_validators")
 _NLTK_DATA = os.path.join(tempfile.gettempdir(), "nltk_data")
 
+_PRESIDIO_PATCHED = False
+
+
+def _pin_presidio_to_small_spacy() -> None:
+    """Force presidio-analyzer to use the small spaCy model (en_core_web_sm).
+
+    Why this exists: `DetectPII()` constructs `AnalyzerEngine()` with no args, and
+    presidio's default config asks for `en_core_web_lg` (~400 MB). On Streamlit
+    Community Cloud that (a) blows the 1 GB RAM cap and (b) can't be auto-downloaded
+    anyway because site-packages is read-only. The wheel for `en_core_web_sm` is
+    already in `requirements.txt`, so we pin presidio to it.
+
+    Idempotent; safe to call multiple times.
+    """
+    global _PRESIDIO_PATCHED
+    if _PRESIDIO_PATCHED:
+        return
+    try:
+        from presidio_analyzer import AnalyzerEngine
+        from presidio_analyzer.nlp_engine import NlpEngineProvider
+    except ImportError:
+        return
+
+    _orig_init = AnalyzerEngine.__init__
+
+    def _patched_init(self, *args, **kwargs):
+        if "nlp_engine" not in kwargs and (len(args) < 1 or args[0] is None):
+            kwargs["nlp_engine"] = NlpEngineProvider(
+                nlp_configuration={
+                    "nlp_engine_name": "spacy",
+                    "models": [
+                        {"lang_code": "en", "model_name": "en_core_web_sm"},
+                    ],
+                }
+            ).create_engine()
+        return _orig_init(self, *args, **kwargs)
+
+    AnalyzerEngine.__init__ = _patched_init
+    _PRESIDIO_PATCHED = True
+
 
 def _ensure_nltk_data() -> None:
     """`competitor_check` calls `nltk.tokenize.sent_tokenize`, which needs the
@@ -150,6 +190,10 @@ def setup_guardrails(token: str | None) -> dict:
     if not token:
         status["error"] = "No Guardrails token — using regex/substring fallbacks."
         return status
+
+    # Apply the presidio small-spaCy pin BEFORE any DetectPII import constructs
+    # an AnalyzerEngine — otherwise it tries to download en_core_web_lg (400 MB).
+    _pin_presidio_to_small_spacy()
 
     os.makedirs(_HUB_TARGET, exist_ok=True)
     if _HUB_TARGET not in sys.path:
@@ -271,6 +315,9 @@ def pii_guard(on_fail):
     """Guard().use(DetectPII(...)). Raises ImportError if the Hub install failed."""
     from guardrails import Guard
 
+    # Belt-and-braces: also pin here in case pii_guard is called before
+    # setup_guardrails has run (e.g. from a cached resource path).
+    _pin_presidio_to_small_spacy()
     DetectPII = _hub_module("pii")
     return Guard().use(DetectPII(pii_entities=PII_ENTITIES, on_fail=on_fail))
 
