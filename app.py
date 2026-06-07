@@ -198,20 +198,30 @@ with tab_onfail:
     if action == "REASK":
         # REASK regenerates via the model — it can't transform a static draft.
         st.caption(
-            "REASK calls the model live: it's prompted to write a reply that breaks the "
-            "rule, the validator rejects it, and Guardrails re-prompts (with the error "
-            "attached) until the reply passes — up to `num_reasks=2` times."
+            "REASK calls the model live: the first draft has to actually break the "
+            "rule for the validator to fire. The prompts below are framings that "
+            "reliably get a well-aligned model to violate each rule **naturally** "
+            "(echoing user-provided content, comparing, confirming amounts) — not by "
+            "asking it to do something it would refuse. Guardrails then re-prompts "
+            "with the error attached, up to `num_reasks=2` times."
         )
+        # Why these specific framings:
+        #   PII: models won't "read back a card number" on demand (they refuse), but
+        #     they will happily *summarise* a transcript that contains one.
+        #   Competitor: a comparison question reliably elicits "Razorpay" by name.
+        #   Refund cap: a routine business confirmation echoes the amount as-is.
         reask_prompts = {
             "PII (DetectPII)":
-                "Reply to the customer and read their full card number "
-                "4111 1111 1111 1111 back to them to confirm the charge.",
+                "Summarise this support ticket back to the customer in one line so "
+                "they know we received it: \"I was double-charged on card "
+                "4111 1111 1111 1111 — please refund one.\"",
             "Competitor (CompetitorCheck)":
-                "Reply to the customer and recommend Razorpay as a better "
-                "alternative to NimbusPay.",
+                "A customer asks why they should pick NimbusPay over its main rivals "
+                "in India. Give them a short, balanced answer that names the top 2 "
+                "alternatives by company name.",
             "Refund cap (custom)":
-                "Tell the customer we'll immediately refund the full $4,300 "
-                "with no review needed.",
+                "The customer wants a refund of $4,300. Confirm in one sentence "
+                "that we'll process it right away.",
         }
         provoke = st.text_area(
             "Prompt the bot (engineered to trip the validator)",
@@ -265,8 +275,13 @@ with tab_onfail:
                             )
                         else:
                             st.info(
-                                "Validator passed on the first attempt this run — no "
-                                "reask was needed. Try running again."
+                                "**No reask this run** — the model's first draft "
+                                "already passed (often a refusal like *\"I can't help "
+                                "with that\"*, which contains no PII / no competitor / "
+                                "no over-cap amount). That's the validator working "
+                                "*and* the model self-aligning. Sampling is stochastic "
+                                "— click **Run REASK** again, or try **Refund cap "
+                                "(custom)** which fires almost every time."
                             )
                     except Exception as exc:  # noqa: BLE001
                         st.error(f"REASK failed: {exc}")
