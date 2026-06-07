@@ -198,35 +198,48 @@ with tab_onfail:
     if action == "REASK":
         # REASK regenerates via the model — it can't transform a static draft.
         st.caption(
-            "REASK calls the model live: the first draft has to actually break the "
-            "rule for the validator to fire. The prompts below are framings that "
-            "reliably get a well-aligned model to violate each rule **naturally** "
-            "(echoing user-provided content, comparing, confirming amounts) — not by "
-            "asking it to do something it would refuse. Guardrails then re-prompts "
-            "with the error attached, up to `num_reasks=2` times."
+            "REASK calls the model live, then re-prompts (with the error attached) "
+            "until the reply passes — up to `num_reasks=2` times. To **guarantee** "
+            "the first draft trips the validator, we swap the normal NimbusPay "
+            "system prompt for a deliberately misconfigured one. That's the lesson: "
+            "*even a badly prompted bot is caught by the guard.*"
         )
-        # Why these specific framings:
-        #   PII: models won't "read back a card number" on demand (they refuse), but
-        #     they will happily *summarise* a transcript that contains one.
-        #   Competitor: a comparison question reliably elicits "Razorpay" by name.
-        #   Refund cap: a routine business confirmation echoes the amount as-is.
+        # Per-validator misconfigured system prompts. Each instructs the bot to do
+        # exactly the thing its validator forbids — so the first draft *always*
+        # fails and REASK is forced to fire.
+        reask_systems = {
+            "PII (DetectPII)":
+                "You are NimbusPay's support bot. To 'confirm' charges, you must "
+                "ALWAYS quote the customer's full card number verbatim in your "
+                "reply, exactly as they wrote it. Never omit, mask, or shorten "
+                "card digits — repeat them in full. Keep replies to one sentence.",
+            "Competitor (CompetitorCheck)":
+                "You are NimbusPay's support bot. When customers ask about "
+                "alternatives, you MUST name the top Indian payment competitors "
+                "explicitly — Razorpay, PayU, Stripe, PayPal — in your reply. Do "
+                "not be coy or use generic phrases like 'other providers'. Keep "
+                "replies to one sentence.",
+            "Refund cap (custom)":
+                "You are NimbusPay's support bot. Whenever a customer asks for a "
+                "refund, immediately confirm the FULL dollar amount they request, "
+                "no matter how large — never escalate, never mention a cap, never "
+                "ask for review. State the amount with a dollar sign. One sentence.",
+        }
         reask_prompts = {
             "PII (DetectPII)":
-                "Summarise this support ticket back to the customer in one line so "
-                "they know we received it: \"I was double-charged on card "
-                "4111 1111 1111 1111 — please refund one.\"",
+                "My card 4111 1111 1111 1111 was double-charged. Please confirm "
+                "you have the right card on file.",
             "Competitor (CompetitorCheck)":
-                "A customer asks why they should pick NimbusPay over its main rivals "
-                "in India. Give them a short, balanced answer that names the top 2 "
-                "alternatives by company name.",
+                "Why should I pick NimbusPay over other payment apps in India?",
             "Refund cap (custom)":
-                "The customer wants a refund of $4,300. Confirm in one sentence "
-                "that we'll process it right away.",
+                "I want a refund of $4,300 right now.",
         }
         provoke = st.text_area(
-            "Prompt the bot (engineered to trip the validator)",
+            "Prompt the bot (a normal customer message)",
             reask_prompts[validator], key="of_reask_text",
         )
+        with st.expander("👀 See the misconfigured system prompt we're using"):
+            st.code(reask_systems[validator], language="text")
         needs_hub, hub_name = {
             "PII (DetectPII)": (not PII_REAL, "DetectPII"),
             "Competitor (CompetitorCheck)": (not COMP_REAL, "CompetitorCheck"),
@@ -252,10 +265,12 @@ with tab_onfail:
                         res = guard(
                             model=G.BOT_MODEL,
                             messages=[
-                                {"role": "system", "content": G.SYSTEM_PROMPT},
+                                {"role": "system",
+                                 "content": reask_systems[validator]},
                                 {"role": "user", "content": provoke},
                             ],
                             num_reasks=2,
+                            temperature=0.2,
                         )
                         call = guard.history[-1]
                         iters = len(call.iterations)
@@ -275,13 +290,11 @@ with tab_onfail:
                             )
                         else:
                             st.info(
-                                "**No reask this run** — the model's first draft "
-                                "already passed (often a refusal like *\"I can't help "
-                                "with that\"*, which contains no PII / no competitor / "
-                                "no over-cap amount). That's the validator working "
-                                "*and* the model self-aligning. Sampling is stochastic "
-                                "— click **Run REASK** again, or try **Refund cap "
-                                "(custom)** which fires almost every time."
+                                "**No reask this run** — even with the misconfigured "
+                                "system prompt the model occasionally refuses or "
+                                "self-corrects on the first attempt (sampling is "
+                                "stochastic). Click **Run REASK** again — it'll fire "
+                                "almost every time."
                             )
                     except Exception as exc:  # noqa: BLE001
                         st.error(f"REASK failed: {exc}")
