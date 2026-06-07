@@ -95,6 +95,27 @@ HUB_VALIDATORS = {
 }
 
 _HUB_TARGET = os.path.join(tempfile.gettempdir(), "gr_hub_validators")
+_NLTK_DATA = os.path.join(tempfile.gettempdir(), "nltk_data")
+
+
+def _ensure_nltk_data() -> None:
+    """`competitor_check` calls `nltk.tokenize.sent_tokenize`, which needs the
+    `punkt` corpus. The hub CLI normally downloads it via the package's
+    `post_install` script; we do the same into a writable /tmp dir."""
+    os.environ.setdefault("NLTK_DATA", _NLTK_DATA)
+    try:
+        import nltk  # noqa: F401  (only present once the validator deps install)
+    except ImportError:
+        return
+    os.makedirs(_NLTK_DATA, exist_ok=True)
+    if _NLTK_DATA not in nltk.data.path:
+        nltk.data.path.insert(0, _NLTK_DATA)
+    # `punkt_tab` is the NLTK ≥3.9 layout; older `punkt` still ships for back-compat.
+    for corpus in ("punkt_tab", "punkt"):
+        try:
+            nltk.download(corpus, download_dir=_NLTK_DATA, quiet=True)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _hub_module(status_key: str):
@@ -149,13 +170,19 @@ def setup_guardrails(token: str | None) -> dict:
         installed = False
         last_err = ""
         # Mirror the hub CLI: try the `[validators]` extra first, then the bare name.
+        # NOTE: we *do not* pass `--no-deps`: the validator's runtime deps (e.g. nltk
+        # for competitor_check) must land alongside it in the /tmp target. We do skip
+        # already-installed deps via --upgrade-strategy=only-if-needed so we don't
+        # duplicate presidio/spacy that requirements.txt already put in site-packages.
         for spec in (f"{pkg}[validators]", pkg):
             try:
                 proc = subprocess.run(
-                    [sys.executable, "-m", "pip", "install", "--no-deps",
-                     "--target", _HUB_TARGET, "--index-url", index,
+                    [sys.executable, "-m", "pip", "install",
+                     "--target", _HUB_TARGET,
+                     "--upgrade-strategy", "only-if-needed",
+                     "--index-url", index,
                      "--extra-index-url", "https://pypi.org/simple", "-q", spec],
-                    capture_output=True, text=True, timeout=300, check=False,
+                    capture_output=True, text=True, timeout=420, check=False,
                 )
                 if proc.returncode == 0:
                     installed = True
@@ -168,6 +195,7 @@ def setup_guardrails(token: str | None) -> dict:
             errors.append(f"{key}: {last_err[-160:] or 'install failed'}")
             continue
 
+        _ensure_nltk_data()
         importlib.invalidate_caches()
         try:
             _hub_module(key)
