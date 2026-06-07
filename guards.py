@@ -379,6 +379,40 @@ def substring_competitor_filter(text: str) -> tuple[str, bool]:
     return " ".join(kept).strip(), found
 
 
+# Sentence-level FILTER helpers. Hub validators (DetectPII, refund cap, etc.)
+# return None for `on_fail=FILTER` on a string output — that's correct per
+# Guardrails semantics (FILTER is designed for list-typed validators), but
+# visually identical to REFRAIN, so the playground demo can't show the
+# difference. We implement FILTER as "drop sentences that fail; keep the rest"
+# so the BEFORE/AFTER pair is meaningful for the learner.
+def filter_pii_sentences(text: str) -> tuple[str, bool]:
+    """Drop sentences that contain PII; keep clean sentences."""
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    kept, found = [], False
+    for s in sentences:
+        if regex_pii_present(s):
+            found = True
+            continue
+        kept.append(s)
+    return " ".join(kept).strip(), found
+
+
+def filter_refund_sentences(text: str, threshold: float) -> tuple[str, bool]:
+    """Drop sentences that mention a dollar amount above `threshold`."""
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    kept, found = [], False
+    amount_re = re.compile(r"\$\s?([\d,]+(?:\.\d+)?)")
+    for s in sentences:
+        over = any(
+            float(a.replace(",", "")) > threshold for a in amount_re.findall(s)
+        )
+        if over:
+            found = True
+            continue
+        kept.append(s)
+    return " ".join(kept).strip(), found
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # LLM-as-judge (Groq) for toxicity & topic — no local ML weights
 # ──────────────────────────────────────────────────────────────────────────────

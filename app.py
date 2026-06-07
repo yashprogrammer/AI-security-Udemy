@@ -299,13 +299,20 @@ with tab_onfail:
                     except Exception as exc:  # noqa: BLE001
                         st.error(f"REASK failed: {exc}")
     else:
+        # Sample texts each contain a *mix* of offending and clean sentences so
+        # FILTER has something to keep — otherwise dropping the bad sentence
+        # leaves the AFTER empty, indistinguishable from REFRAIN.
         defaults = {
             "PII (DetectPII)":
-                "I see the charge on card 4111 1111 1111 1111 tied to john.doe@example.com.",
+                "I see the charge on card 4111 1111 1111 1111 tied to "
+                "john.doe@example.com. Your account is currently active and in "
+                "good standing.",
             "Competitor (CompetitorCheck)":
-                "Try NimbusPay's instant payout. Honestly Razorpay is also popular. Support is 24/7.",
+                "Try NimbusPay's instant payout. Honestly Razorpay is also "
+                "popular. Support is available 24/7.",
             "Refund cap (custom)":
-                "We'll refund the full $4,300 to your account immediately.",
+                "We'll refund the full $4,300 to your account immediately. We "
+                "appreciate your patience while we sorted this out.",
         }
         text = st.text_area("Input text", defaults[validator], key="of_text")
 
@@ -318,35 +325,45 @@ with tab_onfail:
             on_fail = action_map[action]
             after, err, used_fallback = "", None, False
             try:
-                if validator == "PII (DetectPII)":
+                # FILTER short-circuit: Hub validators return None for
+                # on_fail=FILTER on a string output (FILTER is designed for
+                # list-typed validators), which looks identical to REFRAIN.
+                # Implement FILTER as sentence-level drop for all three
+                # validators so the playground shows a meaningful BEFORE/AFTER.
+                if action == "FILTER":
+                    if validator == "PII (DetectPII)":
+                        after, _ = G.filter_pii_sentences(text)
+                    elif validator == "Competitor (CompetitorCheck)":
+                        after, _ = G.substring_competitor_filter(text)
+                    else:  # Refund cap (custom)
+                        after, _ = G.filter_refund_sentences(text, 500.0)
+                elif validator == "PII (DetectPII)":
                     if PII_REAL:
                         after = G.pii_guard(on_fail).parse(text).validated_output
                     else:
                         used_fallback = True
-                        if action == "FILTER":
-                            after, _ = G.regex_pii_scrub(text)  # approximate
-                        elif action == "REFRAIN":
+                        if action == "REFRAIN":
                             after = "" if G.regex_pii_present(text) else text
                         elif action == "EXCEPTION":
                             if G.regex_pii_present(text):
                                 raise ValidationError("PII detected (regex fallback).")
                             after = text
-                        else:
+                        else:  # FIX
                             after, _ = G.regex_pii_scrub(text)
                 elif validator == "Competitor (CompetitorCheck)":
                     if COMP_REAL:
                         after = G.competitor_guard(on_fail).parse(text).validated_output
                     else:
                         used_fallback = True
-                        filtered, found = G.substring_competitor_filter(text)
+                        _, found = G.substring_competitor_filter(text)
                         if action == "REFRAIN":
                             after = "" if found else text
                         elif action == "EXCEPTION":
                             if found:
                                 raise ValidationError("Competitor mentioned (substring fallback).")
                             after = text
-                        else:
-                            after = filtered
+                        else:  # FIX (no fix_value on the validator → original text)
+                            after = text
                 else:  # Refund cap (custom) — always real, pure Python
                     after = G.refund_cap_guard(500.0, on_fail).parse(text).validated_output
             except ValidationError as exc:
@@ -371,6 +388,14 @@ with tab_onfail:
                 chip(f"**{action}** → {explain}")
             if used_fallback:
                 st.caption("↩️ Hub validator unavailable — used the local fallback matcher.")
+            if action == "FILTER":
+                st.caption(
+                    "ℹ️ Guardrails' built-in FILTER targets *list-typed* validators "
+                    "(it drops the bad item). For our string validators we implement "
+                    "FILTER as **sentence-level drop** so the difference between "
+                    "FILTER and REFRAIN is visible — REFRAIN nukes the whole reply, "
+                    "FILTER keeps the clean sentences."
+                )
 
 # ── TAB 3 · VALIDATOR GALLERY ─────────────────────────────────────────────────
 with tab_gallery:
